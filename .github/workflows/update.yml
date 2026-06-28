@@ -1,0 +1,59 @@
+name: Daily Subscription Update
+
+on:
+  schedule:
+    - cron: '0 22 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch latest subscription
+        id: fetch
+        run: bash fetch.sh
+
+      - name: Commit & push
+        id: commit
+        run: |
+          source subs/status.txt 2>/dev/null
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add subs/
+          if git diff --cached --quiet; then
+            echo "No changes, skipping commit"
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "daily update ${fetch_date:-$(date +%Y-%m-%d)} — ${sources:-?}/3 sources, ${total_nodes:-?} nodes"
+            git push
+            echo "committed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sources=${sources:-0}" >> "$GITHUB_OUTPUT"
+          echo "total_nodes=${total_nodes:-0}" >> "$GITHUB_OUTPUT"
+
+      - name: Push notification
+        if: always()
+        env:
+          TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: |
+          source subs/status.txt 2>/dev/null
+          STATUS="$([ ${sources:-0} -gt 0 ] && echo '✅ 成功' || echo '❌ 失败')"
+          CONTENT="日期: ${fetch_date:-$(date +%Y-%m-%d)}
+状态: ${STATUS}
+成功源: ${sources:-0}/3
+节点总数: ${total_nodes:-0}
+提交: ${{ steps.commit.outputs.committed }}"
+
+          curl -s -X POST "http://www.pushplus.plus/send" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"token\": \"${TOKEN}\",
+              \"title\": \"订阅更新 ${STATUS}\",
+              \"content\": \"${CONTENT}\",
+              \"template\": \"txt\"
+            }"
