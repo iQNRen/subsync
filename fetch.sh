@@ -11,64 +11,42 @@ mkdir -p subs
 # ── 工具函数 ────────────────────────────────────
 
 count_nodes() {
-  local file="$1"
-  local n=0
-
-  if [ ! -s "$file" ]; then
-    echo 0
-    return
-  fi
-
-  # 尝试 base64 解码
-  local decoded
-  decoded=$(base64 -d "$file" 2>/dev/null || echo "")
-
+  local file="$1" n=0
+  [ ! -s "$file" ] && { echo 0; return; }
+  local decoded; decoded=$(base64 -d "$file" 2>/dev/null || echo "")
   if [ -n "$decoded" ]; then
     n=$(echo "$decoded" | grep -cE '^(ss|vmess|trojan|hysteria|vless)://' 2>/dev/null || echo 0)
   fi
-
-  # 没找到 → 直接按行数（每行一个节点）
-  if [ "$n" -eq 0 ]; then
-    n=$(grep -cE '^(ss|vmess|trojan|hysteria|vless)://' "$file" 2>/dev/null || echo 0)
-  fi
-
-  # 还不对 → 可能是 Clash YAML
-  if [ "$n" -eq 0 ]; then
-    n=$(grep -cE '^\s+-\s+{?name' "$file" 2>/dev/null || echo 0)
-  fi
-  if [ "$n" -eq 0 ]; then
-    n=$(grep -cE '^\s+-\s+type:' "$file" 2>/dev/null || echo 0)
-  fi
-
-  # 兜底：非空行数
-  if [ "$n" -eq 0 ]; then
-    n=$(grep -cE '.+' "$file" 2>/dev/null || echo 0)
-  fi
-
+  [ "$n" -eq 0 ] && n=$(grep -cE '^(ss|vmess|trojan|hysteria|vless)://' "$file" 2>/dev/null || echo 0)
+  [ "$n" -eq 0 ] && n=$(grep -cE '^\s+-\s+{?name' "$file" 2>/dev/null || echo 0)
+  [ "$n" -eq 0 ] && n=$(grep -cE '^\s+-\s+type:' "$file" 2>/dev/null || echo 0)
+  [ "$n" -eq 0 ] && n=$(grep -cE '.+' "$file" 2>/dev/null || echo 0)
   echo "$n"
 }
 
 fetch() {
-  local name="$1"
-  local url="$2"
-  local outfile="subs/${name}.txt"
-
+  local name="$1" url="$2" outfile="subs/${name}.txt"
   echo "[$name] Fetching: $url"
-
-  local code
-  code=$(curl -s -o "/tmp/sub_${name}.txt" -w "%{http_code}" \
+  local code; code=$(curl -s -o "/tmp/sub_${name}.txt" -w "%{http_code}" \
     --connect-timeout 10 --max-time 30 "$url" 2>/dev/null || echo "000")
-
   if [ "$code" != "200" ] || [ ! -s "/tmp/sub_${name}.txt" ]; then
-    echo "[$name] ✗ SKIP (HTTP $code)"
-    return 1
+    echo "[$name] SKIP (HTTP $code)"; return 1
   fi
-
   cp "/tmp/sub_${name}.txt" "$outfile"
-  local nodes
-  nodes=$(count_nodes "$outfile")
-  echo "[$name] ✓ OK — $nodes nodes, $(wc -c < "$outfile") bytes"
-  return 0
+  local nodes; nodes=$(count_nodes "$outfile")
+  echo "[$name] OK — $nodes nodes, $(wc -c < "$outfile") bytes"; return 0
+}
+
+push_notify() {
+  local token="$1" title="$2" content="$3"
+  [ -z "$token" ] && return
+  curl -s -X POST "http://www.pushplus.plus/send" \
+    -H "Content-Type: application/json" \
+    -d "$(cat <<EOF
+{"token":"${token}","title":"${title}","content":"${content}","template":"txt"}
+EOF
+)" > /dev/null
+  echo "[notify] pushed: ${title}"
 }
 
 # ── 订阅源 ──────────────────────────────────────
@@ -76,23 +54,17 @@ fetch() {
 SUCCESS=0
 declare -A NODE_COUNTS
 
-if fetch "v2rayshare" \
-  "https://static.v2rayshare.net/${YEAR}/${MONTH}/${FILE_NAME}.txt"; then
-  SUCCESS=$((SUCCESS + 1))
-  NODE_COUNTS["v2rayshare"]=$(count_nodes "subs/v2rayshare.txt")
-fi
+fetch "v2rayshare" \
+  "https://static.v2rayshare.net/${YEAR}/${MONTH}/${FILE_NAME}.txt" && \
+  SUCCESS=$((SUCCESS + 1)) && NODE_COUNTS["v2rayshare"]=$(count_nodes "subs/v2rayshare.txt") || true
 
-if fetch "v2ssr-clash" \
-  "https://freenode.v2ssr.net/${YEAR}/${MONTH}/${DAY}-v2ssr.net-clash-vpn-mianfeijiedian.yaml"; then
-  SUCCESS=$((SUCCESS + 1))
-  NODE_COUNTS["v2ssr-clash"]=$(count_nodes "subs/v2ssr-clash.txt")
-fi
+fetch "v2ssr-clash" \
+  "https://freenode.v2ssr.net/${YEAR}/${MONTH}/${DAY}-v2ssr.net-clash-vpn-mianfeijiedian.yaml" && \
+  SUCCESS=$((SUCCESS + 1)) && NODE_COUNTS["v2ssr-clash"]=$(count_nodes "subs/v2ssr-clash.txt") || true
 
-if fetch "v2ssr-v2ray" \
-  "https://freenode.v2ssr.net/${YEAR}/${MONTH}/${DAY}-v2ssr.net-ssr-v2ray-vpn-mianfeijiedian.txt"; then
-  SUCCESS=$((SUCCESS + 1))
-  NODE_COUNTS["v2ssr-v2ray"]=$(count_nodes "subs/v2ssr-v2ray.txt")
-fi
+fetch "v2ssr-v2ray" \
+  "https://freenode.v2ssr.net/${YEAR}/${MONTH}/${DAY}-v2ssr.net-ssr-v2ray-vpn-mianfeijiedian.txt" && \
+  SUCCESS=$((SUCCESS + 1)) && NODE_COUNTS["v2ssr-v2ray"]=$(count_nodes "subs/v2ssr-v2ray.txt") || true
 
 # ── 合并 ────────────────────────────────────────
 
@@ -108,16 +80,32 @@ for f in subs/*.txt; do
   TOTAL_NODES=$((TOTAL_NODES + n))
 done
 
-# ── 写入状态文件供 workflow 用 ─────────────────────
-cat > subs/status.txt <<EOF
-fetch_date=$YEAR-$MONTH-$DAY
-sources=$SUCCESS
-total_nodes=$TOTAL_NODES
-EOF
+echo "Done: $SUCCESS/3 sources — ${TOTAL_NODES} total nodes"
 
-echo "────────────────────────────"
-echo "Files in subs/:"
-ls -lh subs/ | grep -v status.txt
-echo "────────────────────────────"
-echo "✓ $SUCCESS/3 sources — ${TOTAL_NODES} total nodes"
-echo "────────────────────────────"
+# ── Git commit & push ───────────────────────────
+
+git config user.name "github-actions[bot]" 2>/dev/null || true
+git config user.email "github-actions[bot]@users.noreply.github.com" 2>/dev/null || true
+git add subs/
+
+COMMITTED=false
+if git diff --cached --quiet; then
+  echo "[git] no changes, skip commit"
+else
+  git commit -m "daily update ${YEAR}-${MONTH}-${DAY} — ${SUCCESS}/3 sources, ${TOTAL_NODES} nodes"
+  git push
+  COMMITTED=true
+  echo "[git] committed & pushed"
+fi
+
+# ── Pushplus 通知 ───────────────────────────────
+
+if [ -n "$PUSHPLUS_TOKEN" ]; then
+  STATUS_TEXT="$([ "$SUCCESS" -gt 0 ] && echo '✅ 成功' || echo '❌ 失败')"
+  NOTIFY_CONTENT="日期: ${YEAR}-${MONTH}-${DAY}
+状态: ${STATUS_TEXT}
+成功源: ${SUCCESS}/3
+节点总数: ${TOTAL_NODES}
+提交: ${COMMITTED}"
+  push_notify "$PUSHPLUS_TOKEN" "订阅更新 ${STATUS_TEXT}" "$NOTIFY_CONTENT"
+fi
